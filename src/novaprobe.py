@@ -18,6 +18,7 @@ import argparse, re
 import requests, sys, os, json
 import urlparse
 import time
+import logging
 
 from nagios_plugins_fedcloud import helpers
 
@@ -121,91 +122,85 @@ def get_smaller_flavor_id(nova_url, ks_token):
         helpers.nagios_out('Critical', 'Could not fetch flavor ID: %s' % str(e), 2)
 
 
+class NagiosParser(argparse.ArgumentParser):
+    # override default error to fit what nagios expects
+    def error(self, message):
+        self.exit(3, 'Unknown: error: %s\n' % message)
+
+
 def main():
-    class ArgHolder(object):
-        pass
-    argholder = ArgHolder()
+    parser = NagiosParser()
+    parser.add_argument('--endpoint', dest='endpoint', required=True)
+    parser.add_argument('-v', '--verbose', action='store_true')
+    parser.add_argument('--flavor')
+    group_img = parser.add_mutually_exclusive_group(required=True)
+    group_img.add_argument('--image')
+    group_img.add_argument('--appdb-image')
+    group_auth = parser.add_argument_group(title="Authentication")
+    group_auth.add_argument('--cert')
+    group_auth.add_argument('--access-token')
+    group_auth.add_argument('--identity-provider', default='egi.eu')
+    group_auth.add_argument('--protocol', default='openid')
+    parser.add_argument('-t', '--timeout', type=int, default=120)
 
-    argnotspec = []
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--endpoint', dest='endpoint', nargs='?')
-    parser.add_argument('-v', dest='verb', action='store_true')
-    parser.add_argument('--flavor', dest='flavor', nargs='?')
-    parser.add_argument('--image', dest='image', nargs='?')
-    parser.add_argument('--cert', dest='cert', nargs='?')
-    parser.add_argument('--access-token', dest='access_token', nargs='?')
-    parser.add_argument('-t', dest='timeout', type=int, nargs='?', default=120)
-    parser.add_argument('--appdb-image', dest='appdb_img', nargs='?')
-    parser.add_argument('--protocol', dest='protocol', default='openid', nargs='?')
-    parser.add_argument('--identity-provider', dest='identity_provider', default='egi.eu', nargs='?')
+    opts = parser.parse_args()
 
-    parser.parse_args(namespace=argholder)
+    level = logging.DEBUG if opts.verbose else logging.INFO
+    # FIXME: log to stdout
+    logging.basicConfig(level=level)
 
-    for arg in ['endpoint', 'timeout']:
-        if eval('argholder.'+arg) == None:
-            argnotspec.append(arg)
+    if not opts.cert and not opts.access_token:
+        parser.error('cert or access-token not specified')
 
-    if argholder.cert is None and argholder.access_token is None:
-        helpers.nagios_out('Unknown', 'cert or access-token command-line arguments not specified', 3)
+    if not opts.endpoint.startswith("http"):
+        parser.error('expecting http(s) endpotint')
 
-    if argholder.image is None and argholder.appdb_img is None:
-        helpers.nagios_out('Unknown', 'image or appdb-image command-line arguments not specified', 3)
-
-    if len(argnotspec) > 0:
-        msg_error_args = ''
-        for arg in argnotspec:
-            msg_error_args += '%s ' % (arg)
-        helpers.nagios_out('Unknown', 'command-line arguments not specified, '+msg_error_args, 3)
-    else:
-        if not argholder.endpoint.startswith("http") \
-                or not type(argholder.timeout) == int:
-            helpers.nagios_out('Unknown', 'command-line arguments are not correct', 3)
-        if argholder.cert and not os.path.isfile(argholder.cert):
-            helpers.nagios_out('Unknown', 'cert file does not exist', 3)
-        if argholder.access_token and not os.path.isfile(argholder.access_token):
-            helpers.nagios_out('Unknown', 'access-token file does not exist', 3)
+    if opts.cert and not os.path.isfile(opts.cert):
+        parser.error('cert file %s does not exist' % opts.cert)
+    if opts.access_token and not os.path.isfile(opts.access_token):
+        parser.error('access token file %s does not exist' % opts.access_token)
 
     ks_token = None
-    if argholder.access_token:
-        access_file = open(argholder.access_token, 'r')
+    if opts.access_token:
+        access_file = open(opts.access_token, 'r')
         access_token = access_file.read().rstrip("\n")
         access_file.close()
         try:
-            ks_token, tenant, last_response = helpers.get_keystone_token_oidc_v3(argholder.endpoint,
-                                                                                 argholder.timeout,
+            ks_token, tenant, last_response = helpers.get_keystone_token_oidc_v3(opts.endpoint,
+                                                                                 opts.timeout,
                                                                                  token=access_token,
-                                                                                 identity_provider=argholder.identity_provider,
-                                                                                 protocol=argholder.protocol)
+                                                                                 identity_provider=opts.identity_provider,
+                                                                                 protocol=opts.protocol)
             tenant_id, nova_url, glance_url, neutron_url = get_info_v3(tenant, last_response)
-            if argholder.verb:
-                print 'Authenticated with OpenID Connect'
+            if opts.verbose:
+                print('Authenticated with OpenID Connect')
         except helpers.AuthenticationException as e:
             # just go ahead
-            if argholder.verb:
-                print "Authentication with OpenID Connect failed"
+            if opts.verbose:
+                print( "Authentication with OpenID Connect failed")
     if not ks_token:
-        if argholder.cert:
+        if opts.cert:
             # try with certificate v3
             try:
-                ks_token, tenant, last_response = helpers.get_keystone_token_x509_v3(argholder.endpoint,
-                                                                                     argholder.timeout,
-                                                                                     userca=argholder.cert)
+                ks_token, tenant, last_response = helpers.get_keystone_token_x509_v3(opts.endpoint,
+                                                                                     opts.timeout,
+                                                                                     userca=opts.cert)
                 tenant_id, nova_url, glance_url, neutron_url = get_info_v3(tenant, last_response)
-                if argholder.verb:
-                    print 'Authenticated with VOMS (Keystone V3)'
+                if opts.verbose:
+                    print( 'Authenticated with VOMS (Keystone V3)')
             except helpers.AuthenticationException as e:
-                if argholder.verb:
-                    print "Authentication with VOMS (Keystone V3) failed"
+                if opts.verbose:
+                    print( "Authentication with VOMS (Keystone V3) failed")
     if not ks_token:
-        if argholder.cert:
+        if opts.cert:
             # try with certificate v2
             try:
-                ks_token, tenant, last_response = helpers.get_keystone_token_x509_v2(argholder.endpoint,
-                                                                                     argholder.timeout,
-                                                                                     userca=argholder.cert)
+                ks_token, tenant, last_response = helpers.get_keystone_token_x509_v2(opts.endpoint,
+                                                                                     opts.timeout,
+                                                                                     userca=opts.cert)
                 tenant_id, nova_url, glance_url, neutron_url = get_info_v2(tenant, last_response)
-                if argholder.verb:
-                    print 'Authenticated with VOMS (Keystone V2)'
+                if opts.verbose:
+                    print( 'Authenticated with VOMS (Keystone V2)')
             except helpers.AuthenticationException as e:
                 # no more authentication methods to try, fail here
                 helpers.nagios_out('Critical', 'Unable to authenticate against keystone', 2)
@@ -213,38 +208,38 @@ def main():
             # just fail
             helpers.nagios_out('Critical', 'Unable to authenticate against Keystone', 2)
 
-    if argholder.verb:
-        print 'Endpoint: %s' % (argholder.endpoint)
-        print 'Auth token (cut to 64 chars): %.64s' % ks_token
-        print 'Project OPS, ID: %s' % tenant_id
-        print 'Nova: %s' % nova_url
-        print 'Glance: %s' % glance_url
-        print 'Neutron: %s' % neutron_url
+    if opts.verbose:
+        print('Endpoint: %s' % (opts.endpoint))
+        print('Auth token (cut to 64 chars): %.64s' % ks_token)
+        print('Project OPS, ID: %s' % tenant_id)
+        print( 'Nova: %s' % nova_url)
+        print( 'Glance: %s' % glance_url)
+        print( 'Neutron: %s' % neutron_url)
 
 
-    if not argholder.image:
-        image = get_image_id(glance_url, ks_token, argholder.appdb_img)
+    if not opts.image:
+        image = get_image_id(glance_url, ks_token, opts.appdb_img)
     else:
-        image = argholder.image
+        image = opts.image
 
-    if argholder.verb:
-        print "Image: %s" % image
+    if opts.verbose:
+        print( "Image: %s" % image)
 
-    if not argholder.flavor:
+    if not opts.flavor:
         flavor_id = get_smaller_flavor_id(nova_url, ks_token)
     else:
         # fetch flavor_id for given flavor (resource)
         try:
             headers, payload= {}, {}
             headers.update({'x-auth-token': ks_token})
-            response = requests.get(nova_url + '/flavors', headers=headers, cert=argholder.cert,
-                                    verify=True, timeout=argholder.timeout)
+            response = requests.get(nova_url + '/flavors', headers=headers, cert=opts.cert,
+                                    verify=True, timeout=opts.timeout)
             response.raise_for_status()
 
             flavors = response.json()['flavors']
             flavor_id = None
             for f in flavors:
-                if f['name'] == argholder.flavor:
+                if f['name'] == opts.flavor:
                     flavor_id = f['id']
             assert flavor_id is not None
         except (requests.exceptions.ConnectionError,
@@ -253,8 +248,8 @@ def main():
         except (AssertionError, IndexError, AttributeError) as e:
             helpers.nagios_out('Critical', 'could not fetch flavor ID, endpoint does not correctly exposes available flavors: %s' % str(e), 2)
 
-    if argholder.verb:
-        print "Flavor ID: %s" % flavor_id
+    if opts.verbose:
+        print( "Flavor ID: %s" % flavor_id)
 
     network_id = None
     if neutron_url:
@@ -263,27 +258,27 @@ def main():
             headers = {'content-type': 'application/json', 'accept': 'application/json'}
             headers.update({'x-auth-token': ks_token})
             response = requests.get(neutron_url + '/v2.0/networks', headers=headers,
-                                    cert=argholder.cert, verify=True,
-                                    timeout=argholder.timeout)
+                                    cert=opts.cert, verify=True,
+                                    timeout=opts.timeout)
             response.raise_for_status()
             for network in response.json()['networks']:
                 # assume first available active network owned by the tenant is ok
                 if network['status'] == 'ACTIVE' and network['tenant_id'] == tenant_id:
                     network_id = network['id']
-                    if argholder.verb:
-                        print "Network id: %s" % network_id
+                    if opts.verbose:
+                        print( "Network id: %s" % network_id)
                         break
             else:
-                if argholder.verb:
-                    print "No tenant-owned network found, hoping VM creation will still work..."
+                if opts.verbose:
+                    print("No tenant-owned network found, hoping VM creation will still work...")
         except (requests.exceptions.ConnectionError,
                 requests.exceptions.Timeout, requests.exceptions.HTTPError,
                 AssertionError, IndexError, AttributeError) as e:
             helpers.nagios_out('Critical', 'Could not get network id: %s' % helpers.errmsg_from_excp(e), 2)
 
     else:
-        if argholder.verb:
-            print "Skipping network discovery as there is no neutron endpoint"
+        if opts.verbose:
+            print("Skipping network discovery as there is no neutron endpoint")
 
     # create server
     try:
@@ -301,17 +296,17 @@ def main():
             payload['server']['networks'] = [{'uuid': network_id}]
         response = requests.post(nova_url + '/servers', headers=headers,
                                     data=json.dumps(payload),
-                                    cert=argholder.cert, verify=True,
-                                    timeout=argholder.timeout)
+                                    cert=opts.cert, verify=True,
+                                    timeout=opts.timeout)
         response.raise_for_status()
         server_id = response.json()['server']['id']
-        if argholder.verb:
-            print "Creating server:%s name:%s" % (server_id, SERVER_NAME)
+        if opts.verbose:
+            print("Creating server:%s name:%s" % (server_id, SERVER_NAME))
     except (requests.exceptions.ConnectionError,
             requests.exceptions.Timeout, requests.exceptions.HTTPError,
             AssertionError, IndexError, AttributeError) as e:
-        if argholder.verb:
-            print 'Error from server while creating server: %s' % response.text
+        if opts.verbose:
+            print('Error from server while creating server: %s' % response.text)
         helpers.nagios_out('Critical', 'Could not launch server from image UUID:%s: %s' % (image, helpers.errmsg_from_excp(e)), 2)
 
 
@@ -319,7 +314,7 @@ def main():
     server_createt, server_deletet= 0, 0
     server_built = False
     st = time.time()
-    if argholder.verb:
+    if opts.verbose:
         sys.stdout.write('Check server status every %ds: ' % (sleepsec))
     while i < TIMEOUT_CREATE_DELETE/sleepsec:
         # server status
@@ -327,12 +322,12 @@ def main():
             headers, payload= {}, {}
             headers.update({'x-auth-token': ks_token})
             response = requests.get(nova_url + '/servers/%s' % (server_id),
-                                    headers=headers, cert=argholder.cert,
+                                    headers=headers, cert=opts.cert,
                                     verify=True,
-                                    timeout=argholder.timeout)
+                                    timeout=opts.timeout)
             response.raise_for_status()
             status = response.json()['server']['status']
-            if argholder.verb:
+            if opts.verbose:
                 sys.stdout.write(status+' ')
                 sys.stdout.flush()
             if 'ACTIVE' in status:
@@ -341,14 +336,14 @@ def main():
                 break
             if 'ERROR' in status:
                 et = time.time()
-                if argholder.verb:
-                    print "Error from nova: %s" % response.json()['server'].get('fault', '')
+                if opts.verbose:
+                    print("Error from nova: %s" % response.json()['server'].get('fault', ''))
                 break
             time.sleep(sleepsec)
         except (requests.exceptions.ConnectionError,
                 requests.exceptions.Timeout, requests.exceptions.HTTPError,
                 AssertionError, IndexError, AttributeError) as e:
-            if i < tss and argholder.verb:
+            if i < tss and opts.verbose:
                 sys.stdout.write('\n')
                 sys.stdout.write('Try to fetch server:%s status one more time. Error was %s\n' % (server_id,
                                                                                                 helpers.errmsg_from_excp(e)))
@@ -357,15 +352,15 @@ def main():
                 helpers.nagios_out('Critical', 'could not fetch server:%s status: %s' % (server_id, helpers.errmsg_from_excp(e)), 2)
         i += 1
     else:
-        if argholder.verb:
+        if opts.verbose:
             sys.stdout.write('\n')
         helpers.nagios_out('Critical', 'could not create server:%s, timeout:%d exceeded' % (server_id, TIMEOUT_CREATE_DELETE), 2)
 
     server_createt = round(et - st, 2)
 
     if server_built:
-        if argholder.verb:
-            print "\nServer created in %.2f seconds" % (server_createt)
+        if opts.verbose:
+            print("\nServer created in %.2f seconds" % (server_createt))
 
     # server delete
     try:
@@ -373,23 +368,23 @@ def main():
         headers.update({'x-auth-token': ks_token})
         response = requests.delete(nova_url + '/servers/%s' %
                                     (server_id), headers=headers,
-                                    cert=argholder.cert, verify=True,
-                                    timeout=argholder.timeout)
-        if argholder.verb:
-            print "Trying to delete server=%s" % server_id
+                                    cert=opts.cert, verify=True,
+                                    timeout=opts.timeout)
+        if opts.verbose:
+            print( "Trying to delete server=%s" % server_id)
         response.raise_for_status()
     except (requests.exceptions.ConnectionError,
             requests.exceptions.Timeout, requests.exceptions.HTTPError,
             AssertionError, IndexError, AttributeError) as e:
-        if argholder.verb:
-            print 'Error from server while deleting server: %s' % response.text
+        if opts.verbose:
+            print( 'Error from server while deleting server: %s' % response.text)
         helpers.nagios_out('Critical', 'could not execute DELETE server=%s: %s' % (server_id, helpers.errmsg_from_excp(e)), 2)
 
     # waiting for DELETED status
     i = 0
     server_deleted = False
     st = time.time()
-    if argholder.verb:
+    if opts.verbose:
         sys.stdout.write('Check server status every %ds: ' % (sleepsec))
     while i < TIMEOUT_CREATE_DELETE/sleepsec:
         # server status
@@ -398,19 +393,19 @@ def main():
             headers.update({'x-auth-token': ks_token})
 
             response = requests.get(nova_url + '/servers', headers=headers,
-                                    cert=argholder.cert, verify=True,
-                                    timeout=argholder.timeout)
+                                    cert=opts.cert, verify=True,
+                                    timeout=opts.timeout)
             servfound = False
             for s in response.json()['servers']:
                 if server_id == s['id']:
                     servfound = True
                     response = requests.get(nova_url + '/servers/%s' %
                                             (server_id), headers=headers,
-                                            cert=argholder.cert, verify=True,
-                                            timeout=argholder.timeout)
+                                            cert=opts.cert, verify=True,
+                                            timeout=opts.timeout)
                     response.raise_for_status()
                     status = response.json()['server']['status']
-                    if argholder.verb:
+                    if opts.verbose:
                         sys.stdout.write(status+' ')
                         sys.stdout.flush()
                     if status.startswith('DELETED'):
@@ -421,7 +416,7 @@ def main():
             if not servfound:
                 server_deleted = True
                 et = time.time()
-                if argholder.verb:
+                if opts.verbose:
                     sys.stdout.write('DELETED')
                     sys.stdout.flush()
                 break
@@ -435,20 +430,20 @@ def main():
             server_deleted = True
             et = time.time()
 
-            if argholder.verb:
+            if opts.verbose:
                 sys.stdout.write('\n')
                 sys.stdout.write('Could not fetch server:%s status: %s - server is DELETED' % (server_id,
                                                                                                 helpers.errmsg_from_excp(e)))
                 break
         i += 1
     else:
-        if argholder.verb:
+        if opts.verbose:
             sys.stdout.write('\n')
         helpers.nagios_out('Critical', 'could not delete server:%s, timeout:%d exceeded' % (server_id, TIMEOUT_CREATE_DELETE), 2)
 
     server_deletet = round(et - st, 2)
-    if argholder.verb:
-        print "\nServer=%s deleted in %.2f seconds" % (server_id, server_deletet)
+    if opts.verbose:
+        print( "\nServer=%s deleted in %.2f seconds" % (server_id, server_deletet))
 
     if server_built and server_deleted:
         helpers.nagios_out('OK', 'Compute instance=%s created(%.2fs) and destroyed(%.2fs)' % (server_id, server_createt, server_deletet), 0)
