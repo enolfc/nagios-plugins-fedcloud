@@ -34,12 +34,12 @@ num_excp_expand = 0
 
 
 def get_image_id(glance_url, ks_token, appdb_id, timeout):
-    next_url = 'v2/images'
+    next_url = '/v2/images'
     try:
         # TODO: query for the exact image directly once that info is available
         # in glance, that should remove the need for the loop
         while next_url:
-            images_url = urlparse.urljoin(glance_url, next_url)
+            images_url = glance_url + next_url
             response = requests.get(images_url,
                                     headers={'x-auth-token': ks_token},
                                     verify=True, timeout=timeout)
