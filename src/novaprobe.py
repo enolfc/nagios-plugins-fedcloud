@@ -31,14 +31,16 @@ strerr = ''
 num_excp_expand = 0
 
 
-def get_image_id(glance_url, ks_token, appdb_id):
+def get_image_id(glance_url, ks_token, appdb_id, timeout):
     next_url = 'v2/images'
     try:
-        # TODO: query for the exact image directly once that info is available in glance
-        # that should remove the need for the loop
+        # TODO: query for the exact image directly once that info is available
+        # in glance, that should remove the need for the loop
         while next_url:
-            images_url  = urlparse.urljoin(glance_url, next_url)
-            response = requests.get(images_url, headers = {'x-auth-token': ks_token}, verify=True)
+            images_url = urlparse.urljoin(glance_url, next_url)
+            response = requests.get(images_url,
+                                    headers={'x-auth-token': ks_token},
+                                    verify=True, timeout=timeout)
             response.raise_for_status()
             for img in response.json()['images']:
                 attrs = json.loads(img.get('APPLIANCE_ATTRIBUTES', '{}'))
@@ -47,20 +49,28 @@ def get_image_id(glance_url, ks_token, appdb_id):
             next_url = response.json().get('next', '')
     except (requests.exceptions.ConnectionError,
             requests.exceptions.Timeout, requests.exceptions.HTTPError) as e:
-        helpers.nagios_out('Critical', 'Could not fetch image ID: %s' % helpers.errmsg_from_excp(e), 2)
+        helpers.nagios_out('Critical',
+                           'Could not fetch image ID: %s'
+                           % helpers.errmsg_from_excp(e),
+                           2)
     except (AssertionError, IndexError, AttributeError) as e:
-        helpers.nagios_out('Critical', 'Could not fetch image ID: %s' % str(e), 2)
-    helpers.nagios_out('Critical', 'Could not find image ID for AppDB image %s' % appdb_id, 2)
+        helpers.nagios_out('Critical',
+                           'Could not fetch image ID: %s' % str(e),
+                           2)
+    helpers.nagios_out('Critical',
+                       'Could not find image ID for AppDB image %s' % appdb_id,
+                       2)
 
 
-def get_smaller_flavor_id(nova_url, ks_token):
+def get_smaller_flavor_id(nova_url, ks_token, timeout):
     flavor_url = nova_url + '/flavors/detail'
     # flavors with at least 8GB of disk, sorted by number of cpus
     query = {'minDisk': '8', 'sort_dir': 'asc', 'sort_key': 'vcpus'}
     headers = {'x-auth-token': ks_token}
     try:
 
-        response = requests.get(flavor_url, headers=headers, params=query, verify=True)
+        response = requests.get(flavor_url, headers=headers, params=query,
+                                verify=True, timeout=timeout)
         response.raise_for_status()
         flavors = response.json()['flavors']
         # minimum number of CPUs from first result (they are sorted)
@@ -70,9 +80,42 @@ def get_smaller_flavor_id(nova_url, ks_token):
                       key=lambda x: x['ram']).pop(0)['id']
     except (requests.exceptions.ConnectionError,
             requests.exceptions.Timeout, requests.exceptions.HTTPError) as e:
-        helpers.nagios_out('Critical', 'Could not fetch flavor ID: %s' % helpers.errmsg_from_excp(e), 2)
+        helpers.nagios_out('Critical',
+                           'Could not fetch flavor ID: %s'
+                           % helpers.errmsg_from_excp(e),
+                           2)
     except (AssertionError, IndexError, AttributeError) as e:
-        helpers.nagios_out('Critical', 'Could not fetch flavor ID: %s' % str(e), 2)
+        helpers.nagios_out('Critical',
+                           'Could not fetch flavor ID: %s' % str(e),
+                           2)
+
+
+def get_flavor_id(nova_url, ks_token, flavor, timeout):
+    # fetch flavor_id for given flavor (resource)
+    try:
+        headers = {'x-auth-token': ks_token}
+        response = requests.get(nova_url + '/flavors', headers=headers,
+                                verify=True, timeout=timeout)
+        response.raise_for_status()
+
+        flavors = response.json()['flavors']
+        flavor_id = None
+        for f in flavors:
+            if f['name'] == flavor:
+                flavor_id = f['id']
+        assert flavor_id is not None
+    except (requests.exceptions.ConnectionError,
+            requests.exceptions.Timeout, requests.exceptions.HTTPError) as e:
+        helpers.nagios_out('Critical',
+                           'could not fetch flavor ID, endpoint does not '
+                           'correctly exposes available flavors: %s'
+                           % helpers.errmsg_from_excp(e),
+                           2)
+    except (AssertionError, IndexError, AttributeError) as e:
+        helpers.nagios_out('Critical',
+                           'could not fetch flavor ID, endpoint does not '
+                           'correctly exposes available flavors: %s' % str(e),
+                           2)
 
 
 class NagiosParser(argparse.ArgumentParser):
@@ -151,36 +194,20 @@ def main():
     logging.debug('Glance: %s' % glance_url)
     logging.debug('Neutron: %s' % neutron_url)
 
-
+    # Get the right image
     if not opts.image:
-        image = get_image_id(glance_url, ks_token, opts.appdb_img)
+        image = get_image_id(glance_url, ks_token, opts.appdb_img,
+                             opts.timeout)
     else:
         image = opts.image
-
     logging.debug("Image: %s" % image)
 
+    # Get the right flavor
     if not opts.flavor:
-        flavor_id = get_smaller_flavor_id(nova_url, ks_token)
+        flavor_id = get_smaller_flavor_id(nova_url, ks_token, opts.timeout)
     else:
-        # fetch flavor_id for given flavor (resource)
-        try:
-            headers, payload= {}, {}
-            headers.update({'x-auth-token': ks_token})
-            response = requests.get(nova_url + '/flavors', headers=headers, cert=opts.cert,
-                                    verify=True, timeout=opts.timeout)
-            response.raise_for_status()
-
-            flavors = response.json()['flavors']
-            flavor_id = None
-            for f in flavors:
-                if f['name'] == opts.flavor:
-                    flavor_id = f['id']
-            assert flavor_id is not None
-        except (requests.exceptions.ConnectionError,
-                requests.exceptions.Timeout, requests.exceptions.HTTPError) as e:
-            helpers.nagios_out('Critical', 'could not fetch flavor ID, endpoint does not correctly exposes available flavors: %s' % helpers.errmsg_from_excp(e), 2)
-        except (AssertionError, IndexError, AttributeError) as e:
-            helpers.nagios_out('Critical', 'could not fetch flavor ID, endpoint does not correctly exposes available flavors: %s' % str(e), 2)
+        flavor_id = get_flavor_id(nova_url, ks_token, opts.flavor,
+                                  opts.timeout)
 
     logging.debug("Flavor ID: %s" % flavor_id)
 
