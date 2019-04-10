@@ -120,6 +120,37 @@ def get_flavor_id(nova_url, ks_token, flavor, timeout):
                            2)
 
 
+def get_network_id(neutron_url, ks_token, project_id, timeout):
+    if not neutron_url:
+        logging.debug("Skipping network discovery as there is no neutron "
+                      "endpoint")
+        return None
+
+    try:
+        headers = {'content-type': 'application/json',
+                   'accept': 'application/json',
+                   'x-auth-token': ks_token}
+        response = requests.get(neutron_url + '/v2.0/networks',
+                                headers=headers, verify=True, timeout=timeout)
+        response.raise_for_status()
+        for net in response.json()['networks']:
+            # assume first available active network owned by the tenant is ok
+            if (net['status'] == 'ACTIVE' and net['tenant_id'] == project_id):
+                network_id = net['id']
+                logging.debug("Network id: %s" % network_id)
+                break
+        else:
+            logging.debug("No tenant-owned network found, hoping VM creation "
+                          "will still work...")
+    except (requests.exceptions.ConnectionError,
+            requests.exceptions.Timeout, requests.exceptions.HTTPError,
+            AssertionError, IndexError, AttributeError) as e:
+        helpers.nagios_out('Critical',
+                           'Could not get network id: %s'
+                           % helpers.errmsg_from_excp(e),
+                           2)
+
+
 class NagiosParser(argparse.ArgumentParser):
     # override default error to fit what nagios expects
     def error(self, message):
@@ -210,35 +241,11 @@ def main():
     else:
         flavor_id = get_flavor_id(nova_url, ks_token, opts.flavor,
                                   opts.timeout)
-
     logging.debug("Flavor ID: %s" % flavor_id)
 
-    network_id = None
-    if neutron_url:
-        try:
-            headers, payload= {}, {}
-            headers = {'content-type': 'application/json', 'accept': 'application/json'}
-            headers.update({'x-auth-token': ks_token})
-            response = requests.get(neutron_url + '/v2.0/networks', headers=headers,
-                                    cert=opts.cert, verify=True,
-                                    timeout=opts.timeout)
-            response.raise_for_status()
-            for network in response.json()['networks']:
-                # assume first available active network owned by the tenant is ok
-                if network['status'] == 'ACTIVE' and network['tenant_id'] == tenant_id:
-                    network_id = network['id']
-                    logging.debug("Network id: %s" % network_id)
-                    break
-            else:
-                logging.debug("No tenant-owned network found, hoping VM creation will still work...")
-        except (requests.exceptions.ConnectionError,
-                requests.exceptions.Timeout, requests.exceptions.HTTPError,
-                AssertionError, IndexError, AttributeError) as e:
-            helpers.nagios_out('Critical', 'Could not get network id: %s' % helpers.errmsg_from_excp(e), 2)
-
-    else:
-        logging.debug("Skipping network discovery as there is no neutron endpoint")
-
+    # Discover network
+    network_id = get_network_id(neutron_url, ks_token, auth.project_id,
+                                opts.timeout)
     # create server
     try:
         headers, payload= {}, {}
