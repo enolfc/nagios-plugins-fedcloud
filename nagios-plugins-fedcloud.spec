@@ -15,6 +15,7 @@ Requires: python >= 2.6
 Requires: python-argparse
 Requires: python-requests
 Requires: python2-ndg_httpsclient
+Requires: python-six
 %description
 
 %prep
