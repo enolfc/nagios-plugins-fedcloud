@@ -127,13 +127,11 @@ def main():
                      identity_provider=opts.identity_provider,
                      protocol=opts.protocol)
             ks_token = auth.authenticate()
-            if opts.verbose:
-                print("Authentication with %s succeded" % c)
+            logging.debug("Authentication with %s succeded" % c)
             break
         except helpers.AuthenticationException as e:
             # just go ahead
-            if opts.verbose:
-                print("Authentication with %s failed" % c)
+            logging.debug("Authentication with %s failed" % c)
     else:
         # no auth method worked, exit
         helpers.nagios_out('Critical',
@@ -146,13 +144,12 @@ def main():
     glance_url = auth.endpoints['image']
     neutron_url = auth.endpoints['network']
 
-    if opts.verbose:
-        print('Endpoint: %s' % (opts.endpoint))
-        print('Auth token (cut to 64 chars): %.64s' % ks_token)
-        print('Project OPS, ID: %s' % tenant_id)
-        print( 'Nova: %s' % nova_url)
-        print( 'Glance: %s' % glance_url)
-        print( 'Neutron: %s' % neutron_url)
+    logging.debug('Endpoint: %s' % (opts.endpoint))
+    logging.debug('Auth token (cut to 64 chars): %.64s' % ks_token)
+    logging.debug('Project OPS, ID: %s' % tenant_id)
+    logging.debug('Nova: %s' % nova_url)
+    logging.debug('Glance: %s' % glance_url)
+    logging.debug('Neutron: %s' % neutron_url)
 
 
     if not opts.image:
@@ -160,8 +157,7 @@ def main():
     else:
         image = opts.image
 
-    if opts.verbose:
-        print( "Image: %s" % image)
+    logging.debug("Image: %s" % image)
 
     if not opts.flavor:
         flavor_id = get_smaller_flavor_id(nova_url, ks_token)
@@ -186,8 +182,7 @@ def main():
         except (AssertionError, IndexError, AttributeError) as e:
             helpers.nagios_out('Critical', 'could not fetch flavor ID, endpoint does not correctly exposes available flavors: %s' % str(e), 2)
 
-    if opts.verbose:
-        print( "Flavor ID: %s" % flavor_id)
+    logging.debug("Flavor ID: %s" % flavor_id)
 
     network_id = None
     if neutron_url:
@@ -203,20 +198,17 @@ def main():
                 # assume first available active network owned by the tenant is ok
                 if network['status'] == 'ACTIVE' and network['tenant_id'] == tenant_id:
                     network_id = network['id']
-                    if opts.verbose:
-                        print( "Network id: %s" % network_id)
-                        break
+                    logging.debug("Network id: %s" % network_id)
+                    break
             else:
-                if opts.verbose:
-                    print("No tenant-owned network found, hoping VM creation will still work...")
+                logging.debug("No tenant-owned network found, hoping VM creation will still work...")
         except (requests.exceptions.ConnectionError,
                 requests.exceptions.Timeout, requests.exceptions.HTTPError,
                 AssertionError, IndexError, AttributeError) as e:
             helpers.nagios_out('Critical', 'Could not get network id: %s' % helpers.errmsg_from_excp(e), 2)
 
     else:
-        if opts.verbose:
-            print("Skipping network discovery as there is no neutron endpoint")
+        logging.debug("Skipping network discovery as there is no neutron endpoint")
 
     # create server
     try:
@@ -238,13 +230,11 @@ def main():
                                     timeout=opts.timeout)
         response.raise_for_status()
         server_id = response.json()['server']['id']
-        if opts.verbose:
-            print("Creating server:%s name:%s" % (server_id, SERVER_NAME))
+        logging.debug("Creating server:%s name:%s" % (server_id, SERVER_NAME))
     except (requests.exceptions.ConnectionError,
             requests.exceptions.Timeout, requests.exceptions.HTTPError,
             AssertionError, IndexError, AttributeError) as e:
-        if opts.verbose:
-            print('Error from server while creating server: %s' % response.text)
+        logging.debug('Error from server while creating server: %s' % response.text)
         helpers.nagios_out('Critical', 'Could not launch server from image UUID:%s: %s' % (image, helpers.errmsg_from_excp(e)), 2)
 
 
@@ -252,8 +242,8 @@ def main():
     server_createt, server_deletet= 0, 0
     server_built = False
     st = time.time()
-    if opts.verbose:
-        sys.stdout.write('Check server status every %ds: ' % (sleepsec))
+    logging.debug('Check server status every %ds: ' % (sleepsec))
+
     while i < TIMEOUT_CREATE_DELETE/sleepsec:
         # server status
         try:
@@ -265,40 +255,33 @@ def main():
                                     timeout=opts.timeout)
             response.raise_for_status()
             status = response.json()['server']['status']
-            if opts.verbose:
-                sys.stdout.write(status+' ')
-                sys.stdout.flush()
+            logging.debug(status)
             if 'ACTIVE' in status:
                 server_built = True
                 et = time.time()
                 break
             if 'ERROR' in status:
                 et = time.time()
-                if opts.verbose:
-                    print("Error from nova: %s" % response.json()['server'].get('fault', ''))
+                logging.debug("Error from nova: %s" % response.json()['server'].get('fault', ''))
                 break
             time.sleep(sleepsec)
         except (requests.exceptions.ConnectionError,
                 requests.exceptions.Timeout, requests.exceptions.HTTPError,
                 AssertionError, IndexError, AttributeError) as e:
-            if i < tss and opts.verbose:
-                sys.stdout.write('\n')
-                sys.stdout.write('Try to fetch server:%s status one more time. Error was %s\n' % (server_id,
-                                                                                                helpers.errmsg_from_excp(e)))
-                sys.stdout.write('Check server status every %ds: ' % (sleepsec))
+            if i < tss:
+                logging.debug('Try to fetch server:%s status one more time. Error was %s' % (server_id,
+                                                                                             helpers.errmsg_from_excp(e)))
+                logging.debug('Check server status every %ds: ' % (sleepsec))
             else:
                 helpers.nagios_out('Critical', 'could not fetch server:%s status: %s' % (server_id, helpers.errmsg_from_excp(e)), 2)
         i += 1
     else:
-        if opts.verbose:
-            sys.stdout.write('\n')
         helpers.nagios_out('Critical', 'could not create server:%s, timeout:%d exceeded' % (server_id, TIMEOUT_CREATE_DELETE), 2)
 
     server_createt = round(et - st, 2)
 
     if server_built:
-        if opts.verbose:
-            print("\nServer created in %.2f seconds" % (server_createt))
+        logging.debug("\nServer created in %.2f seconds" % (server_createt))
 
     # server delete
     try:
@@ -308,22 +291,19 @@ def main():
                                     (server_id), headers=headers,
                                     cert=opts.cert, verify=True,
                                     timeout=opts.timeout)
-        if opts.verbose:
-            print( "Trying to delete server=%s" % server_id)
+        logging.debug("Trying to delete server=%s" % server_id)
         response.raise_for_status()
     except (requests.exceptions.ConnectionError,
             requests.exceptions.Timeout, requests.exceptions.HTTPError,
             AssertionError, IndexError, AttributeError) as e:
-        if opts.verbose:
-            print( 'Error from server while deleting server: %s' % response.text)
+        logging.debug('Error from server while deleting server: %s' % response.text)
         helpers.nagios_out('Critical', 'could not execute DELETE server=%s: %s' % (server_id, helpers.errmsg_from_excp(e)), 2)
 
     # waiting for DELETED status
     i = 0
     server_deleted = False
     st = time.time()
-    if opts.verbose:
-        sys.stdout.write('Check server status every %ds: ' % (sleepsec))
+    logging.debug('Check server status every %ds: ' % (sleepsec))
     while i < TIMEOUT_CREATE_DELETE/sleepsec:
         # server status
         try:
@@ -343,9 +323,7 @@ def main():
                                             timeout=opts.timeout)
                     response.raise_for_status()
                     status = response.json()['server']['status']
-                    if opts.verbose:
-                        sys.stdout.write(status+' ')
-                        sys.stdout.flush()
+                    logging.debug(status)
                     if status.startswith('DELETED'):
                         server_deleted = True
                         et = time.time()
@@ -354,9 +332,7 @@ def main():
             if not servfound:
                 server_deleted = True
                 et = time.time()
-                if opts.verbose:
-                    sys.stdout.write('DELETED')
-                    sys.stdout.flush()
+                logging.debug('DELETED')
                 break
 
             time.sleep(sleepsec)
@@ -368,20 +344,15 @@ def main():
             server_deleted = True
             et = time.time()
 
-            if opts.verbose:
-                sys.stdout.write('\n')
-                sys.stdout.write('Could not fetch server:%s status: %s - server is DELETED' % (server_id,
-                                                                                                helpers.errmsg_from_excp(e)))
-                break
+            logging.debug('Could not fetch server:%s status: %s - server is DELETED' % (server_id,
+                                                                                        helpers.errmsg_from_excp(e)))
+            break
         i += 1
     else:
-        if opts.verbose:
-            sys.stdout.write('\n')
         helpers.nagios_out('Critical', 'could not delete server:%s, timeout:%d exceeded' % (server_id, TIMEOUT_CREATE_DELETE), 2)
 
     server_deletet = round(et - st, 2)
-    if opts.verbose:
-        print( "\nServer=%s deleted in %.2f seconds" % (server_id, server_deletet))
+    logging.debug("\nServer=%s deleted in %.2f seconds" % (server_id, server_deletet))
 
     if server_built and server_deleted:
         helpers.nagios_out('OK', 'Compute instance=%s created(%.2fs) and destroyed(%.2fs)' % (server_id, server_createt, server_deletet), 0)
