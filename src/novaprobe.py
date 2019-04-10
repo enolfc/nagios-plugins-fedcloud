@@ -187,24 +187,40 @@ def create_server(nova_url, ks_token, network_id, flavor_id, image, timeout):
                            2)
 
 
-def wait_for_server(nova_url, ks_token, server_id, timeout):
+def wait_for_server(nova_url, ks_token, server_id, expected_status, timeout):
     i, sleepsec, tss = 0, 1, 3
     logging.debug('Check server status every %ds: ' % (sleepsec))
+    servers_url = nova_url + '/servers'
+    server_url = nova_url + '/servers/%s' % server_id
+    headers = {'x-auth-token': ks_token}
     while i < TIMEOUT_CREATE_DELETE/sleepsec:
-        # server status
         try:
-            headers = {'x-auth-token': ks_token}
-            response = requests.get(nova_url + '/servers/%s' % server_id,
-                                    headers=headers, verify=True,
-                                    timeout=timeout)
+            response = requests.get(servers_url, headers=headers,
+                                    verify=True, timeout=timeout)
             response.raise_for_status()
-            status = response.json()['server']['status']
-            logging.debug(status)
-            if 'ACTIVE' in status:
-                return True
-            if 'ERROR' in status:
-                logging.error('Error from nova: %s'
-                              % response.json()['server'].get('fault', ''))
+            for s in response.json()['servers']:
+                if server_id == s['id']:
+                    response = requests.get(server_url, headers=headers,
+                                            verify=True, timeout=timeout)
+                    if response.status == 404 and expected_status == 'DELETED':
+                        logging.debug('Server is not found, assuming is '
+                                      'deleted')
+                        return True
+                    response.raise_for_status()
+                    status = response.json()['server']['status']
+                    logging.debug(status)
+                    if status.startswith(expected_status):
+                        return True
+                    if 'ERROR' in status:
+                        logging.error('Error from nova: %s'
+                                      % response.json()['server'].get('fault'))
+                        return False
+                    break
+            else:
+                # server not found!?, ok if deleting
+                if expected_status == 'DELETED':
+                    logging.debug('Server is not found, assuming is deleted')
+                    return True
                 return False
             time.sleep(sleepsec)
         except (requests.exceptions.ConnectionError,
@@ -221,9 +237,32 @@ def wait_for_server(nova_url, ks_token, server_id, timeout):
                 # do not exit as we want to try to delete the server
                 return False
         i += 1
-    logging.error('could not create server:%s, timeout:%d exceeded'
-                  % (server_id, TIMEOUT_CREATE_DELETE))
+    logging.error('timeout:%d exceeded while waiting for server %s'
+                  % (TIMEOUT_CREATE_DELETE, server_id))
     return False
+
+
+def delete_server(nova_url, ks_token, server_id, timeout):
+    try:
+        headers = {'x-auth-token': ks_token}
+        logging.debug("Trying to delete server=%s" % server_id)
+        response = requests.delete(nova_url + '/servers/%s' % server_id,
+                                   headers=headers, verify=True,
+                                   timeout=timeout)
+        response.raise_for_status()
+    except (requests.exceptions.ConnectionError,
+            requests.exceptions.Timeout, requests.exceptions.HTTPError) as e:
+        logging.debug('Error from server while deleting server: %s'
+                      % response.text)
+        helpers.nagios_out('Critical',
+                           'could not execute DELETE server=%s: %s'
+                           % (server_id, helpers.errmsg_from_excp(e)),
+                           2)
+    except (AssertionError, IndexError, AttributeError) as e:
+        helpers.nagios_out('Critical',
+                           'could not execute DELETE server=%s: %s'
+                           % (server_id, helpers.errmsg_from_excp(e)),
+                           2)
 
 
 class NagiosParser(argparse.ArgumentParser):
@@ -326,83 +365,21 @@ def main():
     st = time.time()
     server_id = create_server(nova_url, ks_token, network_id, flavor_id, image,
                               opts.timeout)
-    server_built = wait_for_server(nova_url, ks_token, server_id, opts.timeout)
+    server_built = wait_for_server(nova_url, ks_token, server_id, 'ACTIVE',
+                                   opts.timeout)
     server_createt = round(time.time() - st, 2)
-
     if server_built:
-        logging.debug("\nServer created in %.2f seconds" % (server_createt))
+        logging.debug("Server created in %.2f seconds" % (server_createt))
 
-    server_deletet = 0, 0
-    # server delete
-    try:
-        headers, payload= {}, {}
-        headers.update({'x-auth-token': ks_token})
-        response = requests.delete(nova_url + '/servers/%s' %
-                                    (server_id), headers=headers,
-                                    cert=opts.cert, verify=True,
-                                    timeout=opts.timeout)
-        logging.debug("Trying to delete server=%s" % server_id)
-        response.raise_for_status()
-    except (requests.exceptions.ConnectionError,
-            requests.exceptions.Timeout, requests.exceptions.HTTPError,
-            AssertionError, IndexError, AttributeError) as e:
-        logging.debug('Error from server while deleting server: %s' % response.text)
-        helpers.nagios_out('Critical', 'could not execute DELETE server=%s: %s' % (server_id, helpers.errmsg_from_excp(e)), 2)
-
-    # waiting for DELETED status
-    i = 0
-    server_deleted = False
+    # Delete server
     st = time.time()
-    logging.debug('Check server status every %ds: ' % (sleepsec))
-    while i < TIMEOUT_CREATE_DELETE/sleepsec:
-        # server status
-        try:
-            headers, payload= {}, {}
-            headers.update({'x-auth-token': ks_token})
-
-            response = requests.get(nova_url + '/servers', headers=headers,
-                                    cert=opts.cert, verify=True,
-                                    timeout=opts.timeout)
-            servfound = False
-            for s in response.json()['servers']:
-                if server_id == s['id']:
-                    servfound = True
-                    response = requests.get(nova_url + '/servers/%s' %
-                                            (server_id), headers=headers,
-                                            cert=opts.cert, verify=True,
-                                            timeout=opts.timeout)
-                    response.raise_for_status()
-                    status = response.json()['server']['status']
-                    logging.debug(status)
-                    if status.startswith('DELETED'):
-                        server_deleted = True
-                        et = time.time()
-                        break
-
-            if not servfound:
-                server_deleted = True
-                et = time.time()
-                logging.debug('DELETED')
-                break
-
-            time.sleep(sleepsec)
-        except (requests.exceptions.ConnectionError,
-                requests.exceptions.Timeout,
-                requests.exceptions.HTTPError, AssertionError,
-                IndexError, AttributeError) as e:
-
-            server_deleted = True
-            et = time.time()
-
-            logging.debug('Could not fetch server:%s status: %s - server is DELETED' % (server_id,
-                                                                                        helpers.errmsg_from_excp(e)))
-            break
-        i += 1
-    else:
-        helpers.nagios_out('Critical', 'could not delete server:%s, timeout:%d exceeded' % (server_id, TIMEOUT_CREATE_DELETE), 2)
-
-    server_deletet = round(et - st, 2)
-    logging.debug("\nServer=%s deleted in %.2f seconds" % (server_id, server_deletet))
+    delete_server(nova_url, ks_token, server_id, opts.timeout)
+    server_deleted = wait_for_server(nova_url, ks_token, server_id, 'DELETED',
+                                     opts.timeout)
+    server_deletet = round(time.time() - st, 2)
+    if server_deleted:
+        logging.debug("Server=%s deleted in %.2f seconds"
+                      % (server_id, server_deletet))
 
     if server_built and server_deleted:
         helpers.nagios_out('OK', 'Compute instance=%s created(%.2fs) and destroyed(%.2fs)' % (server_id, server_createt, server_deletet), 0)
