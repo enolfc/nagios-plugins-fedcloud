@@ -14,11 +14,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import argparse, re
-import requests, sys, os, json
-import time
+import argparse
+import json
 import logging
+import os
+import time
 
+import requests
 from six.moves.urllib.parse import urlparse
 
 from pymodule import helpers
