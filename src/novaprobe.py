@@ -343,7 +343,7 @@ def main():
 
     # Get the right image
     if not opts.image:
-        image = get_image_id(glance_url, ks_token, opts.appdb_img,
+        image = get_image_id(glance_url, ks_token, opts.appdb_image,
                              opts.timeout)
     else:
         image = opts.image
