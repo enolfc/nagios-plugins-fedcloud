@@ -151,6 +151,42 @@ def get_network_id(neutron_url, ks_token, project_id, timeout):
                            2)
 
 
+def create_server(nova_url, ks_token, network_id, flavor_id, image, timeout):
+    try:
+        headers = {'content-type': 'application/json',
+                   'accept': 'application/json',
+                   'x-auth-token': ks_token}
+        payload = {
+            'server': {
+                'name': SERVER_NAME,
+                'imageRef': image,
+                'flavorRef': flavor_id,
+            }
+        }
+        if network_id:
+            payload['server']['networks'] = [{'uuid': network_id}]
+        response = requests.post(nova_url + '/servers', headers=headers,
+                                 data=json.dumps(payload),
+                                 verify=True, timeout=timeout)
+        response.raise_for_status()
+        server_id = response.json()['server']['id']
+        logging.debug("Creating server:%s name:%s" % (server_id, SERVER_NAME))
+        return server_id
+    except (requests.exceptions.ConnectionError,
+            requests.exceptions.Timeout, requests.exceptions.HTTPError) as e:
+        logging.debug('Error from server while creating server: %s'
+                      % response.text)
+        helpers.nagios_out('Critical',
+                           'Could not launch server from image UUID:%s: %s'
+                           % (image, helpers.errmsg_from_excp(e)),
+                           2)
+    except (AssertionError, IndexError, AttributeError) as e:
+        helpers.nagios_out('Critical',
+                           'Could not launch server from image UUID:%s: %s'
+                           % (image, helpers.errmsg_from_excp(e)),
+                           2)
+
+
 class NagiosParser(argparse.ArgumentParser):
     # override default error to fit what nagios expects
     def error(self, message):
@@ -246,40 +282,15 @@ def main():
     # Discover network
     network_id = get_network_id(neutron_url, ks_token, auth.project_id,
                                 opts.timeout)
+
     # create server
-    try:
-        headers, payload= {}, {}
-        headers = {'content-type': 'application/json', 'accept': 'application/json'}
-        headers.update({'x-auth-token': ks_token})
-        payload = {
-            'server': {
-                'name': SERVER_NAME,
-                'imageRef': image,
-                'flavorRef': flavor_id,
-            }
-        }
-        if network_id:
-            payload['server']['networks'] = [{'uuid': network_id}]
-        response = requests.post(nova_url + '/servers', headers=headers,
-                                    data=json.dumps(payload),
-                                    cert=opts.cert, verify=True,
-                                    timeout=opts.timeout)
-        response.raise_for_status()
-        server_id = response.json()['server']['id']
-        logging.debug("Creating server:%s name:%s" % (server_id, SERVER_NAME))
-    except (requests.exceptions.ConnectionError,
-            requests.exceptions.Timeout, requests.exceptions.HTTPError,
-            AssertionError, IndexError, AttributeError) as e:
-        logging.debug('Error from server while creating server: %s' % response.text)
-        helpers.nagios_out('Critical', 'Could not launch server from image UUID:%s: %s' % (image, helpers.errmsg_from_excp(e)), 2)
-
-
-    i, s, e, sleepsec, tss = 0, 0, 0, 1, 3
-    server_createt, server_deletet= 0, 0
-    server_built = False
     st = time.time()
+    server_built = False
+    server_id = create_server(nova_url, ks_token, network_id, flavor_id, image,
+                              opts.timeout)
+    i, s, e, sleepsec, tss = 0, 0, 0, 1, 3
+    server_createt, server_deletet = 0, 0
     logging.debug('Check server status every %ds: ' % (sleepsec))
-
     while i < TIMEOUT_CREATE_DELETE/sleepsec:
         # server status
         try:
