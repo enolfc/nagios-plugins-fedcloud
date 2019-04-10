@@ -16,11 +16,12 @@
 
 import argparse, re
 import requests, sys, os, json
-import urlparse
 import time
 import logging
 
-from nagios_plugins_fedcloud import helpers
+from six.moves.urllib.parse import urlparse
+
+from pymodule import helpers
 
 DEFAULT_PORT = 443
 TIMEOUT_CREATE_DELETE = 600
@@ -28,54 +29,6 @@ SERVER_NAME = 'cloudmonprobe-servertest'
 
 strerr = ''
 num_excp_expand = 0
-
-def get_info_v3(tenant, last_response):
-    try:
-       tenant_id = last_response.json()['token']['project']['id']
-    except(KeyError, IndexError) as e:
-        helpers.nagios_out('Critical', 'Could not fetch id for tenant %s: %s' % (tenant, helpers.errmsg_from_excp(e)), 2)
-
-    try:
-        service_catalog = last_response.json()['token']['catalog']
-    except(KeyError, IndexError) as e:
-        helpers.nagios_out('Critical', 'Could not fetch service catalog: %s' % (helpers.errmsg_from_excp(e)), 2)
-
-    r = dict(compute=None, image=None, network=None)
-
-    try:
-        for e in service_catalog:
-            if e['type'] in r:
-                for ep in e['endpoints']:
-                    if ep['interface'] == 'public':
-                        r[e['type']] = ep['url']
-        assert (r['compute'] and r['image'])
-    except(KeyError, IndexError, AssertionError) as e:
-        helpers.nagios_out('Critical', 'Could not fetch service URL: %s' % (helpers.errmsg_from_excp(e)), 2)
-
-    return tenant_id, r['compute'], r['image'], r['network']
-
-def get_info_v2(tenant, last_response):
-    try:
-        tenant_id = last_response.json()['access']['token']['tenant']['id']
-    except(KeyError, IndexError) as e:
-        helpers.nagios_out('Critical', 'Could not fetch id for tenant %s: %s' % (tenant, helpers.errmsg_from_excp(e)), 2)
-
-    try:
-        service_catalog = last_response.json()['access']['serviceCatalog']
-    except(KeyError, IndexError) as e:
-        helpers.nagios_out('Critical', 'Could not fetch service catalog: %s' % (helpers.errmsg_from_excp(e)))
-
-    r = dict(compute=None, image=None, network=None)
-
-    try:
-        for e in service_catalog:
-            if e['type'] in r:
-                r[e['type']] = e['endpoints'][0]['publicURL']
-        assert (r['compute'] and r['image'])
-    except(KeyError, IndexError, AssertionError) as e:
-        helpers.nagios_out('Critical', 'Could not fetch service URL: %s' % (helpers.errmsg_from_excp(e)))
-
-    return tenant_id, r['compute'], r['image'], r['network']
 
 
 def get_image_id(glance_url, ks_token, appdb_id):
@@ -160,53 +113,38 @@ def main():
     if opts.access_token and not os.path.isfile(opts.access_token):
         parser.error('access token file %s does not exist' % opts.access_token)
 
-    ks_token = None
+    # 1. Get a valid Keystone token
+    access_token = None
     if opts.access_token:
-        access_file = open(opts.access_token, 'r')
-        access_token = access_file.read().rstrip("\n")
-        access_file.close()
+        with open(opts.access_token, 'r') as f:
+            access_token = f.read().rstrip('\n')
+    auth_classes = [helpers.V3Oidc, helpers.V3Voms, helpers.V2Voms]
+
+    for c in auth_classes:
         try:
-            ks_token, tenant, last_response = helpers.get_keystone_token_oidc_v3(opts.endpoint,
-                                                                                 opts.timeout,
-                                                                                 token=access_token,
-                                                                                 identity_provider=opts.identity_provider,
-                                                                                 protocol=opts.protocol)
-            tenant_id, nova_url, glance_url, neutron_url = get_info_v3(tenant, last_response)
+            auth = c(endpoint=opts.endpoint, timeout=opts.timeout,
+                     access_token=access_token, userca=opts.cert,
+                     identity_provider=opts.identity_provider,
+                     protocol=opts.protocol)
+            ks_token = auth.authenticate()
             if opts.verbose:
-                print('Authenticated with OpenID Connect')
+                print("Authentication with %s succeded" % c)
+            break
         except helpers.AuthenticationException as e:
             # just go ahead
             if opts.verbose:
-                print( "Authentication with OpenID Connect failed")
-    if not ks_token:
-        if opts.cert:
-            # try with certificate v3
-            try:
-                ks_token, tenant, last_response = helpers.get_keystone_token_x509_v3(opts.endpoint,
-                                                                                     opts.timeout,
-                                                                                     userca=opts.cert)
-                tenant_id, nova_url, glance_url, neutron_url = get_info_v3(tenant, last_response)
-                if opts.verbose:
-                    print( 'Authenticated with VOMS (Keystone V3)')
-            except helpers.AuthenticationException as e:
-                if opts.verbose:
-                    print( "Authentication with VOMS (Keystone V3) failed")
-    if not ks_token:
-        if opts.cert:
-            # try with certificate v2
-            try:
-                ks_token, tenant, last_response = helpers.get_keystone_token_x509_v2(opts.endpoint,
-                                                                                     opts.timeout,
-                                                                                     userca=opts.cert)
-                tenant_id, nova_url, glance_url, neutron_url = get_info_v2(tenant, last_response)
-                if opts.verbose:
-                    print( 'Authenticated with VOMS (Keystone V2)')
-            except helpers.AuthenticationException as e:
-                # no more authentication methods to try, fail here
-                helpers.nagios_out('Critical', 'Unable to authenticate against keystone', 2)
-        else:
-            # just fail
-            helpers.nagios_out('Critical', 'Unable to authenticate against Keystone', 2)
+                print("Authentication with %s failed" % c)
+    else:
+        # no auth method worked, exit
+        helpers.nagios_out('Critical',
+                           'Unable to authenticate against keystone',
+                           2)
+
+    # Here we have authenticated, ready to execute the actual probe
+    tenant_id = auth.project_id
+    nova_url = auth.endpoints['compute']
+    glance_url = auth.endpoints['image']
+    neutron_url = auth.endpoints['network']
 
     if opts.verbose:
         print('Endpoint: %s' % (opts.endpoint))
