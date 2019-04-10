@@ -187,6 +187,45 @@ def create_server(nova_url, ks_token, network_id, flavor_id, image, timeout):
                            2)
 
 
+def wait_for_server(nova_url, ks_token, server_id, timeout):
+    i, sleepsec, tss = 0, 1, 3
+    logging.debug('Check server status every %ds: ' % (sleepsec))
+    while i < TIMEOUT_CREATE_DELETE/sleepsec:
+        # server status
+        try:
+            headers = {'x-auth-token': ks_token}
+            response = requests.get(nova_url + '/servers/%s' % server_id,
+                                    headers=headers, verify=True,
+                                    timeout=timeout)
+            response.raise_for_status()
+            status = response.json()['server']['status']
+            logging.debug(status)
+            if 'ACTIVE' in status:
+                return True
+            if 'ERROR' in status:
+                logging.error('Error from nova: %s'
+                              % response.json()['server'].get('fault', ''))
+                return False
+            time.sleep(sleepsec)
+        except (requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout, requests.exceptions.HTTPError,
+                AssertionError, IndexError, AttributeError) as e:
+            if i < tss:
+                logging.debug('Try to fetch server:%s status one more time. '
+                              'Error was %s'
+                              % (server_id, helpers.errmsg_from_excp(e)))
+                logging.debug('Check server status every %ds: ' % (sleepsec))
+            else:
+                logging.error('Could not fetch server: %s status: %s'
+                              % (server_id, helpers.errmsg_from_excp(e)))
+                # do not exit as we want to try to delete the server
+                return False
+        i += 1
+    logging.error('could not create server:%s, timeout:%d exceeded'
+                  % (server_id, TIMEOUT_CREATE_DELETE))
+    return False
+
+
 class NagiosParser(argparse.ArgumentParser):
     # override default error to fit what nagios expects
     def error(self, message):
@@ -285,51 +324,15 @@ def main():
 
     # create server
     st = time.time()
-    server_built = False
     server_id = create_server(nova_url, ks_token, network_id, flavor_id, image,
                               opts.timeout)
-    i, s, e, sleepsec, tss = 0, 0, 0, 1, 3
-    server_createt, server_deletet = 0, 0
-    logging.debug('Check server status every %ds: ' % (sleepsec))
-    while i < TIMEOUT_CREATE_DELETE/sleepsec:
-        # server status
-        try:
-            headers, payload= {}, {}
-            headers.update({'x-auth-token': ks_token})
-            response = requests.get(nova_url + '/servers/%s' % (server_id),
-                                    headers=headers, cert=opts.cert,
-                                    verify=True,
-                                    timeout=opts.timeout)
-            response.raise_for_status()
-            status = response.json()['server']['status']
-            logging.debug(status)
-            if 'ACTIVE' in status:
-                server_built = True
-                et = time.time()
-                break
-            if 'ERROR' in status:
-                et = time.time()
-                logging.debug("Error from nova: %s" % response.json()['server'].get('fault', ''))
-                break
-            time.sleep(sleepsec)
-        except (requests.exceptions.ConnectionError,
-                requests.exceptions.Timeout, requests.exceptions.HTTPError,
-                AssertionError, IndexError, AttributeError) as e:
-            if i < tss:
-                logging.debug('Try to fetch server:%s status one more time. Error was %s' % (server_id,
-                                                                                             helpers.errmsg_from_excp(e)))
-                logging.debug('Check server status every %ds: ' % (sleepsec))
-            else:
-                helpers.nagios_out('Critical', 'could not fetch server:%s status: %s' % (server_id, helpers.errmsg_from_excp(e)), 2)
-        i += 1
-    else:
-        helpers.nagios_out('Critical', 'could not create server:%s, timeout:%d exceeded' % (server_id, TIMEOUT_CREATE_DELETE), 2)
-
-    server_createt = round(et - st, 2)
+    server_built = wait_for_server(nova_url, ks_token, server_id, opts.timeout)
+    server_createt = round(time.time() - st, 2)
 
     if server_built:
         logging.debug("\nServer created in %.2f seconds" % (server_createt))
 
+    server_deletet = 0, 0
     # server delete
     try:
         headers, payload= {}, {}
