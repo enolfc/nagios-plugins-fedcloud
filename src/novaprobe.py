@@ -162,15 +162,14 @@ def get_smaller_flavor_id(nova_url, session):
 def wait_for_delete(nova_url, server_id, vm_timeout, session):
     server_deleted = False
     i = 0
+    error_calls = 0
     helpers.debug("Check server %s status every %ds:" % (server_id, STATUS_SLEEP_TIME))
     while i < vm_timeout / STATUS_SLEEP_TIME:
         # server status
         try:
             response = session.get(nova_url + "/servers")
-            servfound = False
             for s in response.json()["servers"]:
                 if server_id == s["id"]:
-                    servfound = True
                     response = session.get(nova_url + "/servers/%s" % server_id)
                     response.raise_for_status()
                     status = response.json()["server"]["status"]
@@ -178,26 +177,54 @@ def wait_for_delete(nova_url, server_id, vm_timeout, session):
                     if status.startswith("DELETED"):
                         server_deleted = True
                         break
-            if not servfound:
+            else:
                 server_deleted = True
                 helpers.debug("DELETED (Not found)", False)
             if server_deleted:
                 break
             time.sleep(STATUS_SLEEP_TIME)
+        except requests.exceptions.HTTPError as e:
+            error_calls += 1
+            if response.status_code == 404:
+                server_deleted = True
+                break
+            else:
+                helpers.debug(
+                    "Could not fetch server %s status: %s"
+                    % (server_id, helpers.errmsg_from_excp(e))
+                )
+                if error_calls < 5:
+                    helpers.debug(
+                        "Check server status every %ds: " % (STATUS_SLEEP_TIME)
+                    )
+                else:
+                    helpers.nagios_out(
+                        "Critical",
+                        "could not fetch server=%s: status: %s"
+                        % (server_id, helpers.errmsg_from_excp(e)),
+                        2,
+                    )
         except (
             requests.exceptions.ConnectionError,
             requests.exceptions.Timeout,
-            requests.exceptions.HTTPError,
             AssertionError,
             IndexError,
             AttributeError,
         ) as e:
-            server_deleted = True
+            error_calls += 1
             helpers.debug(
-                "Could not fetch server:%s status: %s - server is DELETED"
+                "Could not fetch server %s status: %s"
                 % (server_id, helpers.errmsg_from_excp(e))
             )
-            break
+            if error_calls < 5:
+                helpers.debug("Check server status every %ds: " % (STATUS_SLEEP_TIME))
+            else:
+                helpers.nagios_out(
+                    "Critical",
+                    "could not fetch server=%s: status: %s"
+                    % (server_id, helpers.errmsg_from_excp(e)),
+                    2,
+                )
         i += 1
     return server_deleted
 
@@ -253,7 +280,8 @@ def clean_up(nova_url, vm_timeout, session):
 
 
 def wait_for_active(nova_url, server_id, vm_timeout, session):
-    i, tss = 0, 3
+    i = 0
+    error_calls = 0
     helpers.debug("Check server status every %ds: " % (STATUS_SLEEP_TIME))
     while i < vm_timeout / STATUS_SLEEP_TIME:
         # server status
@@ -278,7 +306,8 @@ def wait_for_active(nova_url, server_id, vm_timeout, session):
             IndexError,
             AttributeError,
         ) as e:
-            if i < tss:
+            error_calls += 1
+            if error_calls < 5:
                 helpers.debug(
                     "Try to fetch server:%s status one more time. Error was %s\n"
                     % (server_id, helpers.errmsg_from_excp(e))
